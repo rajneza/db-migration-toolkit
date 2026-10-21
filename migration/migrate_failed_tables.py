@@ -174,16 +174,26 @@ def migrate_dataset_rows(staging_conn, dev_conn):
         dev_cur = dev_conn.cursor()
         insert_sql = f"INSERT INTO {dev_schema}.dataset_rows ({columns_str}) VALUES ({placeholders})"
         
-        # Convert dict/list to JSON, handle arrays specially
+        # Convert dict/list to JSON, handle arrays and strings that look like arrays
         migrated = 0
+        errors = 0
         for row in rows:
             converted_row = []
             for val in row:
                 if isinstance(val, dict):
                     converted_row.append(Json(val))
                 elif isinstance(val, list):
-                    # Convert list to PostgreSQL array format
+                    # Already a list - keep as is
                     converted_row.append(val)
+                elif isinstance(val, str) and val.startswith('["') and val.endswith('"]'):
+                    # String that looks like a JSON array - parse it
+                    try:
+                        import json
+                        parsed = json.loads(val)
+                        converted_row.append(parsed)
+                    except:
+                        # If parsing fails, keep as string
+                        converted_row.append(val)
                 else:
                     converted_row.append(val)
             
@@ -192,10 +202,15 @@ def migrate_dataset_rows(staging_conn, dev_conn):
                 dev_conn.commit()
                 migrated += 1
             except Exception as e:
-                log(f"  Row error: {e}", 'ERROR')
+                error_msg = str(e)
+                if "malformed array literal" in error_msg:
+                    log(f"  Array parsing error for row {migrated+1}: {error_msg[:80]}", 'ERROR')
+                else:
+                    log(f"  Row error: {error_msg[:80]}", 'ERROR')
                 dev_conn.rollback()
+                errors += 1
         
-        log(f"✓ Migrated {migrated}/{len(rows)} rows from dataset_rows", 'SUCCESS')
+        log(f"✓ Migrated {migrated}/{len(rows)} rows from dataset_rows ({errors} errors)", 'SUCCESS')
         return migrated
         
     except Exception as e:

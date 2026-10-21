@@ -91,6 +91,23 @@ def get_row_count(conn, schema, table):
             return None  # Table doesn't exist
         return f"ERROR: {str(e)[:50]}"
 
+def get_existing_tables(conn, schema):
+    """Get list of tables that exist in schema"""
+    try:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = %s
+            ORDER BY table_name
+        """, (schema,))
+        tables = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return set(tables)
+    except Exception as e:
+        print(f"{Colors.RED}Error getting table list: {e}{Colors.END}")
+        return set()
+
 def main():
     staging_schema = os.getenv('STAGING_SCHEMA', 'staging')
     dev_schema = os.getenv('DEV_SCHEMA', 'public')
@@ -108,6 +125,16 @@ def main():
         print(f"{Colors.RED}✗ Connection failed: {e}{Colors.END}")
         sys.exit(1)
     
+    # Get actual tables that exist
+    print(f"{Colors.BLUE}Discovering existing tables...{Colors.END}")
+    staging_tables = get_existing_tables(staging_conn, staging_schema)
+    dev_tables = get_existing_tables(dev_conn, dev_schema)
+    print(f"{Colors.GREEN}✓ Found {len(staging_tables)} staging tables, {len(dev_tables)} dev tables{Colors.END}\n")
+    
+    # Filter to only tables in our migration list that exist in staging
+    tables_to_check = [t for t in TABLES_TO_MIGRATE if t in staging_tables]
+    print(f"{Colors.CYAN}Validating {len(tables_to_check)} tables from staging{Colors.END}\n")
+    
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
     print(f"{Colors.BOLD}{'Table Name':<40} {'Staging':>12} {'Dev':>12} {'Status':>12}{Colors.END}")
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
@@ -122,7 +149,7 @@ def main():
     
     validation_results = []
     
-    for table in TABLES_TO_MIGRATE:
+    for table in tables_to_check:
         staging_count = get_row_count(staging_conn, staging_schema, table)
         dev_count = get_row_count(dev_conn, dev_schema, table)
         
@@ -220,7 +247,7 @@ def main():
     # Summary
     print(f"{Colors.BOLD}{Colors.CYAN}VALIDATION SUMMARY{Colors.END}")
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
-    print(f"  Total tables checked:    {len(TABLES_TO_MIGRATE)}")
+    print(f"  Total tables checked:    {len(tables_to_check)}")
     print(f"  {Colors.GREEN}✓ Matched:{Colors.END}              {matched}")
     print(f"  {Colors.YELLOW}⚠ Mismatched:{Colors.END}           {mismatched}")
     print(f"  {Colors.BLUE}ℹ Dev-only tables:{Colors.END}      {dev_only}")

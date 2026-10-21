@@ -68,13 +68,19 @@ for TABLE in "${TABLES[@]}"; do
         sed -i "s/${STAGING_SCHEMA}\./${DEV_SCHEMA}./g" $DUMP_DIR/${TABLE}.sql
     fi
     
+    # Show first few INSERT lines for debugging
+    echo "    First INSERT statement:"
+    grep -m 1 "^INSERT INTO" $DUMP_DIR/${TABLE}.sql || echo "    (No INSERT statements found)"
+    
+    # Restore with error output
+    echo "    Executing restore..."
     PGPASSWORD=$DEV_PASSWORD psql \
         -h $DEV_HOST \
         -p ${DEV_PORT:-5432} \
         -U $DEV_USER \
         -d $DEV_DB \
         -f $DUMP_DIR/${TABLE}.sql \
-        -v ON_ERROR_STOP=1 > /dev/null 2>&1
+        -v ON_ERROR_STOP=1 2>&1 | grep -v "^SET$" | grep -v "^(1 row)$" || true
     
     echo "    ✓ Restored"
 done
@@ -108,7 +114,9 @@ else
 fi
 echo ""
 
-echo "Cleaning up dump files..."
-rm -rf $DUMP_DIR
-echo "✓ Done"
+echo "Dump files preserved at: $DUMP_DIR"
+echo "  datasets:     $DUMP_DIR/datasets.sql"
+echo "  dataset_rows: $DUMP_DIR/dataset_rows.sql"
+echo ""
+echo "To inspect: cat $DUMP_DIR/datasets.sql"
 echo ""

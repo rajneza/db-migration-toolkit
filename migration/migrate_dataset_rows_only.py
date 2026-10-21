@@ -76,6 +76,25 @@ def migrate_dataset_rows(staging_conn, dev_conn):
     dev_schema = os.getenv('DEV_SCHEMA', 'public')
     
     try:
+        # Get column types from dev to identify array columns
+        dev_cur = dev_conn.cursor()
+        dev_cur.execute(f"""
+            SELECT column_name, data_type, udt_name
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = 'dataset_rows'
+            ORDER BY ordinal_position
+        """, (dev_schema,))
+        
+        column_types = {}
+        for col_name, data_type, udt_name in dev_cur.fetchall():
+            column_types[col_name] = {
+                'data_type': data_type,
+                'udt_name': udt_name,
+                'is_array': data_type == 'ARRAY' or udt_name.startswith('_')
+            }
+        
+        log(f"Identified {sum(1 for c in column_types.values() if c['is_array'])} array columns", 'INFO')
+        
         # Get data from staging
         staging_cur = staging_conn.cursor()
         staging_cur.execute(f"SELECT * FROM {staging_schema}.dataset_rows")
@@ -92,7 +111,6 @@ def migrate_dataset_rows(staging_conn, dev_conn):
         columns_str = ', '.join(columns)
         placeholders = ', '.join(['%s'] * len(columns))
         
-        dev_cur = dev_conn.cursor()
         insert_sql = f"INSERT INTO {dev_schema}.dataset_rows ({columns_str}) VALUES ({placeholders})"
         
         migrated = 0
@@ -103,6 +121,8 @@ def migrate_dataset_rows(staging_conn, dev_conn):
             
             for col_idx, val in enumerate(row):
                 col_name = columns[col_idx]
+                col_info = column_types.get(col_name, {})
+                is_array_col = col_info.get('is_array', False)
                 
                 if val is None:
                     converted_row.append(None)
@@ -110,8 +130,13 @@ def migrate_dataset_rows(staging_conn, dev_conn):
                     # Dict → JSON
                     converted_row.append(Json(val))
                 elif isinstance(val, list):
-                    # Already a list → keep as array
-                    converted_row.append(val)
+                    # Already a list
+                    if is_array_col:
+                        # For array columns, keep as list
+                        converted_row.append(val)
+                    else:
+                        # For non-array columns, convert to JSON
+                        converted_row.append(Json(val))
                 elif isinstance(val, str):
                     # Check if string looks like a JSON array
                     val_stripped = val.strip()
@@ -120,13 +145,18 @@ def migrate_dataset_rows(staging_conn, dev_conn):
                             # Try to parse as JSON
                             parsed = json.loads(val_stripped)
                             if isinstance(parsed, list):
-                                log(f"  Row {idx}: Converted string array in column '{col_name}' to list", 'INFO')
-                                converted_row.append(parsed)
+                                if is_array_col:
+                                    # For array columns: convert to PostgreSQL array
+                                    log(f"  Row {idx}, col '{col_name}': Converting string array to PostgreSQL array", 'INFO')
+                                    converted_row.append(parsed)
+                                else:
+                                    # For non-array columns: keep as JSON
+                                    converted_row.append(Json(parsed))
                             else:
                                 converted_row.append(val)
                         except json.JSONDecodeError:
                             # Not valid JSON, keep as string
-                            log(f"  Row {idx}: Column '{col_name}' looks like array but invalid JSON, keeping as string", 'WARNING')
+                            log(f"  Row {idx}, col '{col_name}': Invalid JSON, keeping as string", 'WARNING')
                             converted_row.append(val)
                     else:
                         # Regular string
@@ -149,6 +179,9 @@ def migrate_dataset_rows(staging_conn, dev_conn):
                 # Print row details for debugging
                 if errors < 5:  # Only show first 5 errors in detail
                     log(f"    Row data preview: {str(row)[:200]}", 'ERROR')
+                    # Show which columns are arrays
+                    array_cols = [c for c in columns if column_types.get(c, {}).get('is_array')]
+                    log(f"    Array columns in schema: {array_cols}", 'ERROR')
                 
                 dev_conn.rollback()
                 errors += 1

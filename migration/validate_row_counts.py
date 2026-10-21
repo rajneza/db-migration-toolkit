@@ -23,34 +23,14 @@ class Colors:
     BOLD = '\033[1m'
     END = '\033[0m'
 
-# All 93 tables to migrate (same order as migrate_data_python.py)
-TABLES_TO_MIGRATE = [
-    'organisations', 'users', 'batches', 'jobs', 'account_briefs',
-    'account_channel_context', 'account_drive_folders', 'account_notes',
-    'account_route_assessments', 'agent_metrics', 'ai_feedback_signals',
-    'alerts', 'apn_opportunities', 'apn_sync_runs', 'atrisk_checks',
-    'booking_links', 'connector_credentials', 'crm_tokens', 'cxo_settings',
-    'digest_logs', 'explorium_credit_limits', 'explorium_organisation_credit_limits',
-    'forecast_syncs', 'leader_extras', 'leadership_results', 'partner_contacts',
-    'partner_targets', 'mailbox_owner_companies', 'news_events', 'partners',
-    'persona', 'playbook_kb', 'playbook_variants', 'presentations',
-    'qbr_generations', 'results', 'search_query_log', 'sequence_enrollments',
-    'sequence_steps', 'sf_sync_runs', 'team_notifications', 'user_settings',
-    'user_tokens', 'zoho_accounts', 'zoho_deals', 'zoho_leads',
-    'partner_connections', 'partner_facts', 'partner_readiness',
-    'partner_solutions', 'zoho_sync_runs', 'datasets', 'dataset_columns',
-    'dataset_metadata', 'dataset_owners', 'dataset_rows', 'dataset_services',
-    'organisation_dataset_services', 'queries', 'query_columns',
-    'query_data_sources', 'jobs_run_history', 'ai_api_usage',
-    'assistant_threads', 'crm_auth_accounts', 'crm_sync_runs',
-    'entity_map_settings', 'event_state', 'groq_playground_prompts',
-    'llm_model_map', 'messages', 'notification_schedules', 'playbook_evaluations',
-    'playbook_runs', 'slack_channels', 'user_agents', 'workflow_request_reviews',
-    'workflow_requests', 'workflows', 'dataset_usage_logs', 'session_activities',
-    'account_meeting_summaries', 'ai_assisted_jobs', 'chat_sessions',
-    'message_feedback', 'slack_tokens', 'alert_check_log', 'data_assets',
-    'data_assets_columns', 'message_runs', 'search_logs'
-]
+class Colors:
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BLUE = '\033[94m'
+    BOLD = '\033[1m'
+    END = '\033[0m'
 
 def get_connection(is_staging=False):
     """Get database connection"""
@@ -125,14 +105,17 @@ def main():
         print(f"{Colors.RED}✗ Connection failed: {e}{Colors.END}")
         sys.exit(1)
     
-    # Get actual tables that exist
-    print(f"{Colors.BLUE}Discovering existing tables...{Colors.END}")
+    # Get actual tables that exist in staging (source of truth)
+    print(f"{Colors.BLUE}Discovering tables in staging (source)...{Colors.END}")
     staging_tables = get_existing_tables(staging_conn, staging_schema)
-    dev_tables = get_existing_tables(dev_conn, dev_schema)
-    print(f"{Colors.GREEN}✓ Found {len(staging_tables)} staging tables, {len(dev_tables)} dev tables{Colors.END}\n")
+    print(f"{Colors.GREEN}✓ Found {len(staging_tables)} tables in staging{Colors.END}\n")
     
-    # Filter to only tables in our migration list that exist in staging
-    tables_to_check = [t for t in TABLES_TO_MIGRATE if t in staging_tables]
+    print(f"{Colors.BLUE}Discovering tables in dev (target)...{Colors.END}")
+    dev_tables = get_existing_tables(dev_conn, dev_schema)
+    print(f"{Colors.GREEN}✓ Found {len(dev_tables)} tables in dev{Colors.END}\n")
+    
+    # Check ALL staging tables (sorted alphabetically)
+    tables_to_check = sorted(list(staging_tables))
     print(f"{Colors.CYAN}Validating {len(tables_to_check)} tables from staging{Colors.END}\n")
     
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
@@ -247,7 +230,10 @@ def main():
     # Summary
     print(f"{Colors.BOLD}{Colors.CYAN}VALIDATION SUMMARY{Colors.END}")
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
-    print(f"  Total tables checked:    {len(tables_to_check)}")
+    print(f"  Staging tables found:    {len(staging_tables)}")
+    print(f"  Dev tables found:        {len(dev_tables)}")
+    print(f"  Tables validated:        {len(tables_to_check)}")
+    print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
     print(f"  {Colors.GREEN}✓ Matched:{Colors.END}              {matched}")
     print(f"  {Colors.YELLOW}⚠ Mismatched:{Colors.END}           {mismatched}")
     print(f"  {Colors.BLUE}ℹ Dev-only tables:{Colors.END}      {dev_only}")
@@ -258,13 +244,16 @@ def main():
     print(f"  Total rows in dev:       {Colors.CYAN}{total_dev:,}{Colors.END}")
     
     # Expected migration count (staging tables only)
-    staging_table_count = matched + mismatched
-    print(f"  Tables migrated:         {Colors.CYAN}{staging_table_count}{Colors.END}")
+    staging_table_count = matched + mismatched + staging_only
+    print(f"  Tables in staging:       {Colors.CYAN}{len(staging_tables)}{Colors.END}")
+    print(f"  Tables in dev:           {Colors.CYAN}{len(dev_tables)}{Colors.END}")
     
-    if matched == staging_table_count and errors == 0:
-        print(f"\n{Colors.BOLD}{Colors.GREEN}✓✓✓ VALIDATION SUCCESSFUL - ALL MIGRATED TABLES MATCH! ✓✓✓{Colors.END}\n")
+    if matched + mismatched == len(tables_to_check) and errors == 0:
+        print(f"\n{Colors.BOLD}{Colors.GREEN}✓✓✓ VALIDATION SUCCESSFUL - ALL STAGING TABLES CHECKED! ✓✓✓{Colors.END}\n")
         if dev_only > 0:
             print(f"{Colors.BLUE}Note: {dev_only} dev-only tables exist (not in staging - this is normal){Colors.END}\n")
+        if staging_only > 0:
+            print(f"{Colors.YELLOW}Note: {staging_only} staging-only tables (not migrated to dev){Colors.END}\n")
     elif mismatched > 0:
         print(f"\n{Colors.BOLD}{Colors.YELLOW}⚠ VALIDATION WARNING - Some tables have different counts{Colors.END}")
         print(f"\n{Colors.YELLOW}Mismatched tables:{Colors.END}")

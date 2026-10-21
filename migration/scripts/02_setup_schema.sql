@@ -10,7 +10,7 @@
 --   - 13 additional tables from staging schema
 --   - Total: 101 tables
 -- 
--- Source: ../new_server_schema_combined.sql (generated from dev + staging schemas)
+-- Source: new_server_schema_combined.sql (generated from dev + staging schemas)
 -- 
 -- ============================================================================
 
@@ -22,7 +22,7 @@
 \echo ''
 
 -- Include the combined schema file
-\i ../new_server_schema_combined.sql
+\i new_server_schema_combined.sql
 
 \echo ''
 \echo '========================================================================'

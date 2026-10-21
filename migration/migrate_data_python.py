@@ -188,6 +188,13 @@ def migrate_table(staging_conn, dev_conn, table_name, batch_size=1000, dry_run=F
         log(f"Table {table_name} is empty - SKIPPING", 'INFO')
         return 0, 0
     
+    # Check if dev table already has data (if --skip-existing flag)
+    if hasattr(migrate_table, 'skip_existing') and migrate_table.skip_existing:
+        dev_count = get_row_count(dev_conn, dev_schema, table_name)
+        if dev_count > 0:
+            log(f"Table {table_name} already has {dev_count} rows in dev - SKIPPING", 'INFO')
+            return 0, 0
+    
     log(f"Migrating {table_name}: {row_count:,} rows", 'INFO')
     
     if dry_run:
@@ -314,6 +321,7 @@ def main():
     parser.add_argument('--skip-empty', action='store_true', default=True, help='Skip empty tables')
     parser.add_argument('--verbose', action='store_true', help='Show detailed error messages')
     parser.add_argument('--continue-on-error', action='store_true', default=True, help='Continue if table fails')
+    parser.add_argument('--skip-existing', action='store_true', help='Skip tables that already have data in dev')
     
     args = parser.parse_args()
     
@@ -367,6 +375,9 @@ def main():
         print("-" * 70)
         
         try:
+            # Set skip_existing flag for the function
+            migrate_table.skip_existing = args.skip_existing
+            
             rows, migrated = migrate_table(
                 staging_conn, 
                 dev_conn, 

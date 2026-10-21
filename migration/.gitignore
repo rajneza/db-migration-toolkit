@@ -1,0 +1,46 @@
+# Environment files with credentials
+.env
+.env.local
+.env.production
+
+# Log files
+logs/*.log
+*.log
+
+# Validation output
+validation/*.log
+
+# Backup files
+backups/
+*.dump
+*.sql.gz
+*.backup
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+env/
+
+# Archives
+*.zip
+*.tar.gz
+*.tar.bz2

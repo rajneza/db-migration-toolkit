@@ -15,8 +15,10 @@ Usage:
 import os
 import sys
 import time
+import json
 import psycopg2
-from psycopg2.extras import execute_batch
+from psycopg2.extras import execute_batch, Json
+from psycopg2.extensions import register_adapter, AsIs
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -27,36 +29,68 @@ from dotenv import load_dotenv
 # Load .env file
 load_dotenv()
 
-# Tables to migrate (93 tables)
-ALL_TABLES = [
-    'account_brief_history', 'account_briefs', 'account_channel_context',
-    'account_drive_folders', 'account_notes', 'account_route_assessments',
-    'agent_metrics', 'agent_tool_grants', 'ai_feedback_signals',
-    'alembic_version', 'alerts', 'apn_opportunities', 'apn_sync_runs',
-    'atrisk_checks', 'batches', 'booking_links', 'campaign_attributions',
-    'company_playbooks', 'connector_credentials', 'crm_tokens',
-    'cxo_settings', 'demo_leads', 'digest_logs', 'domain_logo_cache',
-    'event_invitations', 'explorium_credit_limits',
-    'explorium_organisation_credit_limits', 'forecast_syncs', 'jobs',
-    'leader_extras', 'leadership_results', 'mailbox_owner_companies',
-    'mailbox_watch_state', 'mcp_connectors', 'mcp_tool_grants',
-    'metrics_snapshots', 'news_events', 'org_events', 'organisations',
-    'otp_verifications', 'partner_benchmarks', 'partner_connections',
-    'partner_contacts', 'partner_engagement_cases', 'partner_facts',
-    'partner_readiness', 'partner_references', 'partner_solutions',
-    'partner_targets', 'partners', 'person_intel_cache', 'persona',
-    'playbook_kb', 'playbook_variants', 'presentations', 'qbr_generations',
-    'relationship_bridges', 'results', 'search_index', 'search_query_log',
-    'sequence_enrollments', 'sequence_steps', 'sf_accounts', 'sf_deals',
-    'sf_leads', 'sf_sync_runs', 'shared_webhook', 'suppressions',
+# Register adapter for dict/list to JSON
+register_adapter(dict, Json)
+register_adapter(list, Json)
+
+# Tables in dependency order (parents first, then children)
+ORDERED_TABLES = [
+    # Base tables (no dependencies)
+    'alembic_version', 'domain_logo_cache', 'demo_leads', 'otp_verifications',
+    'person_intel_cache',
+    
+    # Users and organisations (referenced by many tables)
+    'organisations',
+    'users',
+    
+    # Batches (referenced by jobs)
+    'batches',
+    
+    # Jobs (referenced by many tables)
+    'jobs',
+    
+    # Tables that depend on users
+    'user_settings', 'user_tokens', 'persona', 'booking_links',
+    'connector_credentials', 'crm_tokens', 'digest_logs', 'forecast_syncs',
+    'qbr_generations', 'search_query_log', 'sf_sync_runs', 'zoho_sync_runs',
+    'apn_sync_runs',
+    
+    # Tables that depend on organisations
+    'explorium_credit_limits', 'explorium_organisation_credit_limits',
+    'partner_contacts', 'partner_targets',
+    
+    # Tables that depend on jobs
+    'account_briefs', 'account_channel_context', 'account_drive_folders',
+    'account_notes', 'account_route_assessments', 'agent_metrics',
+    'ai_feedback_signals', 'alerts', 'leader_extras', 'leadership_results',
+    'mailbox_owner_companies', 'news_events', 'playbook_variants',
+    'presentations', 'results',
+    
+    # Tables with JSON columns
+    'apn_opportunities', 'atrisk_checks', 'cxo_settings', 'partner_connections',
+    'partner_facts', 'partner_readiness', 'partner_solutions', 'partners',
+    'playbook_kb', 'zoho_accounts', 'zoho_deals', 'zoho_leads',
+    'datasets', 'dataset_rows',
+    
+    # Sequence tables (special handling needed)
+    'sequence_enrollments', 'sequence_steps',
+    
+    # Tables that depend on sequence_enrollments
+    'team_notifications',
+    
+    # Other tables
+    'account_brief_history', 'agent_tool_grants', 'campaign_attributions',
+    'company_playbooks', 'event_invitations', 'mailbox_watch_state',
+    'mcp_connectors', 'mcp_tool_grants', 'metrics_snapshots', 'org_events',
+    'partner_benchmarks', 'partner_engagement_cases', 'partner_references',
+    'relationship_bridges', 'shared_webhook', 'suppressions',
     'team_notification_comments', 'team_notification_reactions',
-    'team_notifications', 'user_reference_documents', 'user_settings',
-    'user_tokens', 'users', 'webhook_companies', 'zoho_accounts',
-    'zoho_deals', 'zoho_leads', 'zoho_sync_runs',
-    # Staging-only tables (13 tables)
-    'datasets', 'dataset_rows', 'dataset_history',
-    'outreach_sequences', 'outreach_enrollments', 'outreach_steps',
-    'outreach_reply_log', 'vault_documents', 'vault_chunks',
+    'user_reference_documents', 'webhook_companies', 'sf_accounts',
+    'sf_deals', 'sf_leads',
+    
+    # Staging-only tables
+    'dataset_history', 'outreach_sequences', 'outreach_enrollments',
+    'outreach_steps', 'outreach_reply_log', 'vault_documents', 'vault_chunks',
     'sequence_replies', 'llm_calls', 'run_stats', 'usage'
 ]
 
@@ -132,7 +166,7 @@ def table_exists(conn, schema, table_name):
         """, (schema, table_name))
         return cur.fetchone()[0]
 
-def migrate_table(staging_conn, dev_conn, table_name, batch_size=1000, dry_run=False):
+def migrate_table(staging_conn, dev_conn, table_name, batch_size=1000, dry_run=False, verbose=False):
     """Migrate data from one table"""
     
     staging_schema = os.getenv('STAGING_SCHEMA', 'staging')
@@ -192,24 +226,59 @@ def migrate_table(staging_conn, dev_conn, table_name, batch_size=1000, dry_run=F
         batch = []
         
         for row in staging_cur:
-            batch.append(row)
+            # Convert dict/list to JSON for JSONB columns
+            converted_row = []
+            for val in row:
+                if isinstance(val, (dict, list)):
+                    converted_row.append(Json(val))
+                else:
+                    converted_row.append(val)
+            
+            batch.append(tuple(converted_row))
             
             if len(batch) >= batch_size:
-                execute_batch(dev_cur, insert_sql, batch)
-                dev_conn.commit()
-                rows_migrated += len(batch)
-                
-                # Progress update
-                progress = (rows_migrated / row_count) * 100
-                print(f"\r  Progress: {rows_migrated:,}/{row_count:,} ({progress:.1f}%)", end='', flush=True)
-                
-                batch = []
+                try:
+                    execute_batch(dev_cur, insert_sql, batch)
+                    dev_conn.commit()
+                    rows_migrated += len(batch)
+                    
+                    # Progress update
+                    progress = (rows_migrated / row_count) * 100
+                    print(f"\r  Progress: {rows_migrated:,}/{row_count:,} ({progress:.1f}%)", end='', flush=True)
+                    
+                    batch = []
+                except Exception as e:
+                    if verbose:
+                        log(f"  Batch error: {str(e)}", 'ERROR')
+                    # Try inserting rows one by one
+                    for single_row in batch:
+                        try:
+                            dev_cur.execute(insert_sql, single_row)
+                            dev_conn.commit()
+                            rows_migrated += 1
+                        except Exception as row_error:
+                            if verbose:
+                                log(f"  Row error: {str(row_error)}", 'ERROR')
+                            dev_conn.rollback()
+                    batch = []
         
         # Insert remaining rows
         if batch:
-            execute_batch(dev_cur, insert_sql, batch)
-            dev_conn.commit()
-            rows_migrated += len(batch)
+            try:
+                execute_batch(dev_cur, insert_sql, batch)
+                dev_conn.commit()
+                rows_migrated += len(batch)
+            except Exception as e:
+                if verbose:
+                    log(f"  Final batch error: {str(e)}", 'ERROR')
+                # Try one by one
+                for single_row in batch:
+                    try:
+                        dev_cur.execute(insert_sql, single_row)
+                        dev_conn.commit()
+                        rows_migrated += 1
+                    except:
+                        dev_conn.rollback()
         
         print()  # New line after progress
         
@@ -224,7 +293,10 @@ def migrate_table(staging_conn, dev_conn, table_name, batch_size=1000, dry_run=F
         return row_count, rows_migrated
         
     except Exception as e:
+        import traceback
         log(f"  ✗ Error migrating {table_name}: {str(e)}", 'ERROR')
+        if config.verbose:
+            log(f"  Traceback: {traceback.format_exc()}", 'ERROR')
         dev_conn.rollback()
         return row_count, 0
 
@@ -240,6 +312,8 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1000, help='Batch size for inserts (default: 1000)')
     parser.add_argument('--dry-run', action='store_true', help='Preview without copying data')
     parser.add_argument('--skip-empty', action='store_true', default=True, help='Skip empty tables')
+    parser.add_argument('--verbose', action='store_true', help='Show detailed error messages')
+    parser.add_argument('--continue-on-error', action='store_true', default=True, help='Continue if table fails')
     
     args = parser.parse_args()
     
@@ -247,7 +321,7 @@ def main():
     if args.tables:
         tables = [t.strip() for t in args.tables.split(',')]
     else:
-        tables = ALL_TABLES
+        tables = ORDERED_TABLES
     
     print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*70}{Colors.END}")
     print(f"{Colors.BOLD}{Colors.CYAN}DATA MIGRATION - STAGING TO DEV{Colors.END}")
@@ -298,7 +372,8 @@ def main():
                 dev_conn, 
                 table, 
                 batch_size=args.batch_size,
-                dry_run=args.dry_run
+                dry_run=args.dry_run,
+                verbose=args.verbose
             )
             
             total_rows += rows

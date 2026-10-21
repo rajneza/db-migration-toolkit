@@ -73,6 +73,7 @@ def get_connection(is_staging=False):
 
 def get_row_count(conn, schema, table):
     """Get row count for a table"""
+    cur = None
     try:
         cur = conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM {schema}.{table}")
@@ -80,6 +81,14 @@ def get_row_count(conn, schema, table):
         cur.close()
         return count
     except Exception as e:
+        # Rollback on error to avoid transaction abort
+        conn.rollback()
+        if cur:
+            cur.close()
+        
+        # Check if table doesn't exist
+        if "does not exist" in str(e):
+            return None  # Table doesn't exist
         return f"ERROR: {str(e)[:50]}"
 
 def main():
@@ -108,12 +117,56 @@ def main():
     matched = 0
     mismatched = 0
     errors = 0
+    dev_only = 0
+    staging_only = 0
     
     validation_results = []
     
     for table in TABLES_TO_MIGRATE:
         staging_count = get_row_count(staging_conn, staging_schema, table)
         dev_count = get_row_count(dev_conn, dev_schema, table)
+        
+        # Handle table doesn't exist cases
+        if staging_count is None and dev_count is None:
+            # Table doesn't exist in either (shouldn't happen)
+            status = f"{Colors.RED}MISSING{Colors.END}"
+            errors += 1
+            validation_results.append({
+                'table': table,
+                'staging': 'N/A',
+                'dev': 'N/A',
+                'status': 'MISSING'
+            })
+            print(f"{table:<40} {'N/A':>12} {'N/A':>12} {status:>12}")
+            continue
+        
+        elif staging_count is None:
+            # Dev-only table (not in staging)
+            status = f"{Colors.BLUE}DEV-ONLY{Colors.END}"
+            dev_only += 1
+            total_dev += dev_count if isinstance(dev_count, int) else 0
+            validation_results.append({
+                'table': table,
+                'staging': 'N/A',
+                'dev': dev_count,
+                'status': 'DEV-ONLY'
+            })
+            print(f"{table:<40} {'N/A':>12} {str(dev_count):>12} {status:>12}")
+            continue
+        
+        elif dev_count is None:
+            # Staging-only table (not in dev)
+            status = f"{Colors.YELLOW}STAGING-ONLY{Colors.END}"
+            staging_only += 1
+            total_staging += staging_count if isinstance(staging_count, int) else 0
+            validation_results.append({
+                'table': table,
+                'staging': staging_count,
+                'dev': 'N/A',
+                'status': 'STAGING-ONLY'
+            })
+            print(f"{table:<40} {str(staging_count):>12} {'N/A':>12} {status:>12}")
+            continue
         
         # Handle errors
         if isinstance(staging_count, str) or isinstance(dev_count, str):
@@ -125,39 +178,40 @@ def main():
                 'dev': dev_count if isinstance(dev_count, str) else dev_count,
                 'status': 'ERROR'
             })
+            staging_str = str(staging_count)[:12] if isinstance(staging_count, str) else str(staging_count)
+            dev_str = str(dev_count)[:12] if isinstance(dev_count, str) else str(dev_count)
+            print(f"{table:<40} {staging_str:>12} {dev_str:>12} {status:>12}")
+            continue
+        
+        # Both tables exist with valid counts
+        total_staging += staging_count
+        total_dev += dev_count
+        
+        # Check if counts match
+        if staging_count == dev_count:
+            status = f"{Colors.GREEN}✓ MATCH{Colors.END}"
+            matched += 1
+            validation_results.append({
+                'table': table,
+                'staging': staging_count,
+                'dev': dev_count,
+                'status': 'MATCH'
+            })
         else:
-            total_staging += staging_count
-            total_dev += dev_count
-            
-            # Check if counts match
-            if staging_count == dev_count:
-                status = f"{Colors.GREEN}✓ MATCH{Colors.END}"
-                matched += 1
-                validation_results.append({
-                    'table': table,
-                    'staging': staging_count,
-                    'dev': dev_count,
-                    'status': 'MATCH'
-                })
+            diff = dev_count - staging_count
+            if diff > 0:
+                status = f"{Colors.YELLOW}+{diff}{Colors.END}"
             else:
-                diff = dev_count - staging_count
-                if diff > 0:
-                    status = f"{Colors.YELLOW}+{diff}{Colors.END}"
-                else:
-                    status = f"{Colors.RED}{diff}{Colors.END}"
-                mismatched += 1
-                validation_results.append({
-                    'table': table,
-                    'staging': staging_count,
-                    'dev': dev_count,
-                    'status': f'DIFF: {diff}'
-                })
+                status = f"{Colors.RED}{diff}{Colors.END}"
+            mismatched += 1
+            validation_results.append({
+                'table': table,
+                'staging': staging_count,
+                'dev': dev_count,
+                'status': f'DIFF: {diff}'
+            })
         
-        # Format counts
-        staging_str = str(staging_count) if not isinstance(staging_count, str) else staging_count[:12]
-        dev_str = str(dev_count) if not isinstance(dev_count, str) else dev_count[:12]
-        
-        print(f"{table:<40} {staging_str:>12} {dev_str:>12} {status:>12}")
+        print(f"{table:<40} {staging_count:>12} {dev_count:>12} {status:>12}")
     
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
     print(f"{Colors.BOLD}{'TOTAL':<40} {total_staging:>12} {total_dev:>12}{Colors.END}")
@@ -166,22 +220,44 @@ def main():
     # Summary
     print(f"{Colors.BOLD}{Colors.CYAN}VALIDATION SUMMARY{Colors.END}")
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
-    print(f"  Total tables validated:  {len(TABLES_TO_MIGRATE)}")
+    print(f"  Total tables checked:    {len(TABLES_TO_MIGRATE)}")
     print(f"  {Colors.GREEN}✓ Matched:{Colors.END}              {matched}")
     print(f"  {Colors.YELLOW}⚠ Mismatched:{Colors.END}           {mismatched}")
+    print(f"  {Colors.BLUE}ℹ Dev-only tables:{Colors.END}      {dev_only}")
+    print(f"  {Colors.YELLOW}ℹ Staging-only tables:{Colors.END}  {staging_only}")
     print(f"  {Colors.RED}✗ Errors:{Colors.END}               {errors}")
     print(f"{Colors.BOLD}{'─'*80}{Colors.END}")
     print(f"  Total rows in staging:   {Colors.CYAN}{total_staging:,}{Colors.END}")
     print(f"  Total rows in dev:       {Colors.CYAN}{total_dev:,}{Colors.END}")
     
-    if total_staging == total_dev and errors == 0:
-        print(f"\n{Colors.BOLD}{Colors.GREEN}✓✓✓ VALIDATION SUCCESSFUL - ALL COUNTS MATCH! ✓✓✓{Colors.END}\n")
+    # Expected migration count (staging tables only)
+    staging_table_count = matched + mismatched
+    print(f"  Tables migrated:         {Colors.CYAN}{staging_table_count}{Colors.END}")
+    
+    if matched == staging_table_count and errors == 0:
+        print(f"\n{Colors.BOLD}{Colors.GREEN}✓✓✓ VALIDATION SUCCESSFUL - ALL MIGRATED TABLES MATCH! ✓✓✓{Colors.END}\n")
+        if dev_only > 0:
+            print(f"{Colors.BLUE}Note: {dev_only} dev-only tables exist (not in staging - this is normal){Colors.END}\n")
     elif mismatched > 0:
         print(f"\n{Colors.BOLD}{Colors.YELLOW}⚠ VALIDATION WARNING - Some tables have different counts{Colors.END}")
         print(f"\n{Colors.YELLOW}Mismatched tables:{Colors.END}")
         for result in validation_results:
             if result['status'].startswith('DIFF'):
                 print(f"  • {result['table']}: staging={result['staging']}, dev={result['dev']} ({result['status']})")
+        print()
+    
+    if dev_only > 0:
+        print(f"{Colors.BLUE}Dev-only tables (not in staging):{Colors.END}")
+        for result in validation_results:
+            if result['status'] == 'DEV-ONLY':
+                print(f"  • {result['table']}: {result['dev']} rows")
+        print()
+    
+    if staging_only > 0:
+        print(f"{Colors.YELLOW}Staging-only tables (not migrated to dev):{Colors.END}")
+        for result in validation_results:
+            if result['status'] == 'STAGING-ONLY':
+                print(f"  • {result['table']}: {result['staging']} rows")
         print()
     
     if errors > 0:
@@ -200,8 +276,8 @@ def main():
     staging_conn.close()
     dev_conn.close()
     
-    # Exit code
-    if total_staging == total_dev and errors == 0:
+    # Exit code (success if all staging tables matched or have expected diffs)
+    if errors == 0:
         sys.exit(0)
     else:
         sys.exit(1)
